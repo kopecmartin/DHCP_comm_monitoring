@@ -7,13 +7,14 @@
 # Date:
 # #######################
 
+import ipaddress
 import pcapy
 import socket
 from struct import *
 import sys
 
 
-def main(argv):
+def main():
     # list all devices
     # devices = pcapy.findalldevs()
 
@@ -38,8 +39,8 @@ def main(argv):
         parse_packet(packet)
 
 
-# function to parse a packet
 def parse_packet(packet):
+    """Parses packet, obtains information from DHCP packets only"""
 
     # parse ethernet header
     ethLength = 14
@@ -133,5 +134,130 @@ def parse_packet(packet):
                     print 'YourIP ' + IP
 
 
+def errorOutput(msg):
+    """Prints error message and ends with error code"""
+    sys.stderr.write("\033[1;31mERROR: " + msg + "\033[0m\n")
+    sys.stdout.write("\nDHCP communication monitoring script:\n")
+    sys.stdout.write("Run as:\n./dhcp-stats.py <ip_addr/mask> ")
+    sys.stdout.write("[ <ip_addr/mask> [...] ]\n\n")
+    sys.exit(1)
+
+
+def checkFormat(network):
+    """
+    Checks format of network address
+    returns ip_network object
+    """
+
+    net = network.split("/")
+    if len(net) != 2:
+        errorOutput("Wrong format of IP address and mask")
+
+    mask = net[1]
+    net = net[0]
+
+    if int(mask) > 32 or int(mask) < 0:
+        errorOutput("Wrong network mask")
+
+    check = net.split('.')
+    if len(check) != 4:
+        errorOutput("Wrong format of IP address")
+
+    for n in check:
+        if len(n) == 0 or int(n) < 0 or int(n) > 255:
+            errorOutput("Wrong format of IP address")
+
+    try:
+        network = ipaddress.ip_network(unicode(network))
+    except:
+        errorOutput("Wrong IP for the mask given")
+
+    return network
+
+
+class NetPools:
+    """
+    NetPools contains monitored networks
+    """
+
+    def __init__(self):
+        self.networks = []
+
+    def addNetwork(self, net):
+        """
+        Adds a network to the IpPool
+        Arguments:
+         - net = network address in string
+        """
+        self.networks.append(Network(checkFormat(net)))
+
+    def addIp2Range(self, ip):
+        """
+        Adds IP to the right range(s)
+        Arguments:
+        - ip = ip address in string
+        """
+        for net in self.networks:
+            if net.isInRange(ip):
+                net.increaseHosts()
+
+    def removeIpFromRange(self, ip):
+        """
+        Remove IP from the range(s)
+        Arguments:
+        - ip = ip address in string
+        """
+        for net in self.networks:
+            if net.isInRange(ip):
+                net.decreaseHosts()
+
+
+class Network:
+    """
+    Network gathers information about a network
+    """
+
+    def __init__(self, net):
+        # ipaddress network object
+        self.net = net
+        # number of assigned IPs at the moment
+        self.allocatedHosts = 0
+        # maximum of allocated IPs till now
+        self.maximum = 0
+
+    def isInRange(self, ip):
+        for i in self.net.hosts():
+            if ip == str(i):
+                return True
+        return False
+
+    def getMaxHosts(self):
+        return self.net.num_addresses
+
+    def increaseHosts(self):
+        """Increases number of assigned IPs
+        and changes the maximum if needed
+        """
+        self.allocatedHosts += 1
+        if self.allocatedHosts > self.maximum:
+            self.maximum = self.allocatedHosts
+
+    def decreaseHosts(self):
+        """Decreases number of assigned IPs"""
+        self.allocatedHosts -= 1
+
+
 if __name__ == "__main__":
-    main(sys.argv)
+
+    if len(sys.argv) < 2:
+        errorOutput("Wrong arguments")
+
+    Pool = NetPools()
+
+    for net in sys.argv[1:]:
+        Pool.addNetwork(net)
+        print net
+
+    print Pool.networks[0].isInRange(unicode('10.10.10.2'))
+
+    # main()
