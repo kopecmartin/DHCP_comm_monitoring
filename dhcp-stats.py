@@ -12,13 +12,18 @@ import pcapy
 import socket
 from struct import *
 import sys
+import curses
+import time
+import threading
+
+verbose = False
 
 
 def main():
     # list all devices
     # devices = pcapy.findalldevs()
 
-    dev = 'enp0s3'
+    dev = 'wlp3s0'
     print "Sniffing device " + dev
 
     '''
@@ -77,13 +82,6 @@ def parse_packet(packet):
             udph = unpack('!HHHH', udpHeader)
 
             srcPort = udph[0]
-            destPort = udph[1]
-            length = udph[2]
-            checksum = udph[3]
-
-            # print 'Source Port : ' + str(srcPort) + ' Dest Port : '
-            #   + str(destPort) + ' Length : ' + str(length)
-            #   + ' Checksum : ' + str(checksum)
 
             # DHCP protocol
             if srcPort == 67 or srcPort == 68:
@@ -96,13 +94,6 @@ def parse_packet(packet):
                 data = packet[hSize + 241:]
                 reqType = unpack('!BBB', data[:3])[1]
 
-                # DEBUG
-                # print 'DHCP DATA:'
-                # print 'Source Port: ' + str(srcPort)
-                # print 'Dest Port: ' + str(destPort)
-                # print 'Length: ' + str(length)
-                # print 'Checksum: ' + str(checksum)
-
                 # number of ACK == 5
                 if reqType == 5:
 
@@ -111,12 +102,21 @@ def parse_packet(packet):
                     yourIP = yourIP[:4]
                     yourIP = unpack('!BBBB', yourIP)
 
+                    leaseTime = packet[hSize + 251:]
+                    leaseTime = leaseTime[:4]
+                    leaseTime = unpack('!i', leaseTime)[0]
+
                     IP = str(yourIP[0]) + '.' + str(yourIP[1]) + '.'
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
 
+                    # add ip to statistics
+                    Pool.addIP2Range(IP, leaseTime)
+
                     # DEBUG
-                    print "ACK"
-                    print 'YourIP ' + IP
+                    if verbose:
+                        print "ACK"
+                        print 'YourIP ' + IP
+                        print "Release time:" + str(leaseTime)
 
                 # number of RELEASE == 7
                 if reqType == 7:
@@ -129,9 +129,13 @@ def parse_packet(packet):
                     IP = str(yourIP[0]) + '.' + str(yourIP[1]) + '.'
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
 
+                    # remove ip from statistics
+                    Pool.removeIPFromRange(IP)
+
                     # DEBUG
-                    print "RELEASE"
-                    print 'YourIP ' + IP
+                    if verbose:
+                        print "RELEASE"
+                        print 'YourIP ' + IP
 
 
 def errorOutput(msg):
@@ -175,41 +179,113 @@ def checkFormat(network):
     return network
 
 
+class LeaseTimer:
+    """
+    LeaseTimer contains all set up timers to count down
+    the lease time of IP address assigned by DHCP server
+    """
+
+    def __init__(self):
+        self.timers = []
+
+    def setTimer(self, ip, leaseTime):
+        t = threading.Timer(leaseTime, self._timerFunc, [ip])
+        self.timers.append([ip, t])
+        t.start()
+
+    def resetTimer(self, ip, leaseTime):
+        self.stopTimer(ip)
+        self.setTimer(ip, leaseTime)
+
+    def _timerFunc(self, ip):
+        pass
+        if verbose:
+            print "Lease time is up for: ", ip
+        # do action when time's up
+
+    def stopTimer(self, ip):
+        for t in self.timers:
+            if t[0] == ip:
+                self.timers.remove(t)
+                t[1].cancel()
+                break
+
+
 class NetPools:
     """
     NetPools contains monitored networks
     """
 
     def __init__(self):
+        # list objects of monitored networks
         self.networks = []
+        # list of assigned IP addresses
+        self.ips = []
+        # instance of LeaseTimer class
+        self.timer = LeaseTimer()
 
     def addNetwork(self, net):
         """
-        Adds a network to the IpPool
+        Adds a network to the pool
         Arguments:
          - net = network address in string
         """
         self.networks.append(Network(checkFormat(net)))
 
-    def addIp2Range(self, ip):
+    def addIP2Range(self, ip, leaseTime):
         """
         Adds IP to the right range(s)
         Arguments:
         - ip = ip address in string
         """
-        for net in self.networks:
-            if net.isInRange(ip):
-                net.increaseHosts()
+        if ip in self.ips:
+            # reset the timer
+            self.timer.resetTimer(ip, leaseTime)
+        else:
+            self.ips.append(ip)
+            self.timer.setTimer(ip, leaseTime)
 
-    def removeIpFromRange(self, ip):
+            for net in self.networks:
+                if net.isInRange(ip):
+                    net.increaseHosts()
+                    self.printStatistics()
+
+    def removeIPFromRange(self, ip):
         """
         Remove IP from the range(s)
         Arguments:
         - ip = ip address in string
         """
-        for net in self.networks:
-            if net.isInRange(ip):
-                net.decreaseHosts()
+
+        # check if ip was assigned before, if it was not
+        # it may mean program started after ACK was sent -
+        # in case like that just ignore it
+        if ip in self.ips:
+            self.ips.remove(ip)
+
+            for net in self.networks:
+                if net.isInRange(ip):
+                    net.decreaseHosts()
+                    self.printStatistics()
+
+    def printStatistics(self):
+        stdscr.clear()
+        headers = ["IP Prefix", "Max hosts",
+                   "Allocated addresses", "Utilization"]
+        stdscr.addstr(headers[0] + "\t" + headers[1] + "\t" +
+                      headers[2] + "\t" + headers[3] + "\n")
+
+        for n in self.networks:
+            A = str(n.net) + "\t"
+            H = str(n.maxHosts) + (len(headers[1]) -
+                                   len(str(n.maxHosts))) * " " + "\t"
+            AH = str(n.allocatedHosts) + (len(headers[2]) -
+                                          len(str(n.allocatedHosts))
+                                          ) * " " + "\t"
+            U = str("unknown\n")
+            stdscr.addstr(A + H + AH + U)
+
+        stdscr.refresh()
 
 
 class Network:
@@ -222,8 +298,8 @@ class Network:
         self.net = net
         # number of assigned IPs at the moment
         self.allocatedHosts = 0
-        # maximum of allocated IPs till now
-        self.maximum = 0
+        # number of addresses
+        self.maxHosts = net.num_addresses
 
     def isInRange(self, ip):
         for i in self.net.hosts():
@@ -231,16 +307,9 @@ class Network:
                 return True
         return False
 
-    def getMaxHosts(self):
-        return self.net.num_addresses
-
     def increaseHosts(self):
-        """Increases number of assigned IPs
-        and changes the maximum if needed
-        """
+        """Increases number of assigned IPs"""
         self.allocatedHosts += 1
-        if self.allocatedHosts > self.maximum:
-            self.maximum = self.allocatedHosts
 
     def decreaseHosts(self):
         """Decreases number of assigned IPs"""
@@ -249,7 +318,11 @@ class Network:
 
 if __name__ == "__main__":
 
-    if len(sys.argv) < 2:
+    # verbose mode for debugging
+    if "-v" in sys.argv:
+        verbose = True
+
+    if len(sys.argv) < 3 and "-v" in sys.argv:
         errorOutput("Wrong arguments")
 
     Pool = NetPools()
@@ -258,6 +331,21 @@ if __name__ == "__main__":
         Pool.addNetwork(net)
         print net
 
-    print Pool.networks[0].isInRange(unicode('10.10.10.2'))
+    # print Pool.networks[0].isInRange(unicode('10.10.10.2'))
 
-    # main()
+    # Pool.printStatistics()
+
+    try:
+        stdscr = curses.initscr()
+        curses.noecho()
+        curses.cbreak()
+        stdscr.keypad(1)
+        main()
+    finally:
+        stdscr.erase()
+        stdscr.refresh()
+        stdscr.keypad(0)
+        curses.echo()
+        curses.nocbreak()
+        curses.endwin()
+
