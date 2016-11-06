@@ -7,15 +7,19 @@
 # Date:
 # #######################
 
+import argparse
+import csv
+import curses
 import ipaddress
 import pcapy
 import socket
-from struct import *
 import sys
-import curses
-import time
 import threading
+import time
 
+from struct import *
+
+# verbose mode
 verbose = False
 
 
@@ -102,9 +106,10 @@ def parse_packet(packet):
                     yourIP = yourIP[:4]
                     yourIP = unpack('!BBBB', yourIP)
 
-                    leaseTime = packet[hSize + 251:]
+                    leaseTime = packet[hSize + 257:]
                     leaseTime = leaseTime[:4]
                     leaseTime = unpack('!i', leaseTime)[0]
+
 
                     IP = str(yourIP[0]) + '.' + str(yourIP[1]) + '.'
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
@@ -187,27 +192,34 @@ class LeaseTimer:
 
     def __init__(self):
         self.timers = []
+        self.reset = False
 
     def setTimer(self, ip, leaseTime):
+        print "set timer for ", ip
         t = threading.Timer(leaseTime, self._timerFunc, [ip])
         self.timers.append([ip, t])
         t.start()
 
     def resetTimer(self, ip, leaseTime):
+        self.reset = True
         self.stopTimer(ip)
+        self.reset = False
         self.setTimer(ip, leaseTime)
 
     def _timerFunc(self, ip):
-        pass
         if verbose:
-            print "Lease time is up for: ", ip
+            print "Lease time is up or timer was canceled for: ", ip
         # do action when time's up
+        if not self.reset:
+            self.stopTimer(ip)
+            Pool.removeIPFromRange(ip)
 
     def stopTimer(self, ip):
         for t in self.timers:
             if t[0] == ip:
                 self.timers.remove(t)
                 t[1].cancel()
+                print "timer canceled"
                 break
 
 
@@ -241,6 +253,7 @@ class NetPools:
         if ip in self.ips:
             # reset the timer
             self.timer.resetTimer(ip, leaseTime)
+            pass
         else:
             self.ips.append(ip)
             self.timer.setTimer(ip, leaseTime)
@@ -248,6 +261,7 @@ class NetPools:
             for net in self.networks:
                 if net.isInRange(ip):
                     net.increaseHosts()
+                    print "HERE"
                     self.printStatistics()
 
     def removeIPFromRange(self, ip):
@@ -268,12 +282,24 @@ class NetPools:
                     net.decreaseHosts()
                     self.printStatistics()
 
+    def getStatistics(self):
+        """Returns list of staitistic lines in CSV format"""
+        data = []
+        for n in self.networks:
+            A = str(n.net) + ","
+            H = str(n.maxHosts) + ","
+            AH = str(n.allocatedHosts) + ","
+            U = round(float(n.allocatedHosts) / n.maxHosts * 100, 2)
+            U = str(U) + "%"
+            data.append(A + H + AH + U)
+        return data
+
     def printStatistics(self):
-        stdscr.clear()
+        # stdscr.clear()
         headers = ["IP Prefix", "Max hosts",
                    "Allocated addresses", "Utilization"]
-        stdscr.addstr(headers[0] + "\t" + headers[1] + "\t" +
-                      headers[2] + "\t" + headers[3] + "\n")
+        print (headers[0] + "\t" + headers[1] + "\t" +
+               headers[2] + "\t" + headers[3] + "\n")
 
         for n in self.networks:
             A = str(n.net) + "\t"
@@ -282,10 +308,11 @@ class NetPools:
             AH = str(n.allocatedHosts) + (len(headers[2]) -
                                           len(str(n.allocatedHosts))
                                           ) * " " + "\t"
-            U = str("unknown\n")
-            stdscr.addstr(A + H + AH + U)
+            U = round(float(n.allocatedHosts) / n.maxHosts * 100, 2)
+            U = str(U) + "%\n"
+            print (A + H + AH + U)
 
-        stdscr.refresh()
+        # stdscr.refresh()
 
 
 class Network:
@@ -298,8 +325,8 @@ class Network:
         self.net = net
         # number of assigned IPs at the moment
         self.allocatedHosts = 0
-        # number of addresses
-        self.maxHosts = net.num_addresses
+        # number of usable addresses
+        self.maxHosts = net.num_addresses - 2
 
     def isInRange(self, ip):
         for i in self.net.hosts():
@@ -316,26 +343,72 @@ class Network:
         self.allocatedHosts -= 1
 
 
+def createCSVFile():
+    """Creates a new CSV file and saves statistics there"""
+    with open('log.csv', 'wb') as csvfile:
+        spamwriter = csv.writer(csvfile, delimiter=',')
+        headers = ["IP Prefix", "Max hosts",
+                   "Allocated addresses", "Utilization"]
+        spamwriter.writerow(headers)
+        spamwriter.writerow(Pool.getStatistics())
+
+
+def logFunction(period):
+    """Function exports every period seconds statistics to file"""
+    print period
+    while True:
+        time.sleep(float(period))
+        print "exporting"
+        createCSVFile()
+
+
+def exportStatistics(period):
+    """Creates a new thread for exporting statistics to a file"""
+    t = threading.Thread(target=logFunction, args=(period,))
+    # deamon will attempt to terminate child process when parent exits
+    t.daemon = True
+    t.start()
+
+
+def importPCAP(file):
+    pass
+
+
 if __name__ == "__main__":
 
-    # verbose mode for debugging
-    if "-v" in sys.argv:
+    # arguments handler
+    parser = argparse.ArgumentParser(description='DHCP communication' +
+                                                 ' monitoring script')
+
+    parser.add_argument('-v', action='store_true', help='verbose mode')
+    parser.add_argument('-c', metavar='<int>',
+                        help='export statistics to a file every int sec')
+    parser.add_argument('-r', metavar='<file>',
+                        help='create statistics from pcap file')
+    parser.add_argument('NETWORKS', nargs='+', help='')
+
+    args = vars(parser.parse_args())
+
+    if args['v']:
         verbose = True
 
-    if len(sys.argv) < 3 and "-v" in sys.argv:
-        errorOutput("Wrong arguments")
+    if args['c']:
+        exportStatistics(args['c'])
 
+    if args['r']:
+        importPCAP(args['r'])
+
+    # create instance of Network pools
     Pool = NetPools()
 
-    for net in sys.argv[1:]:
+    for net in args["NETWORKS"]:
         Pool.addNetwork(net)
         print net
 
     # print Pool.networks[0].isInRange(unicode('10.10.10.2'))
 
-    # Pool.printStatistics()
-
-    try:
+    main()
+    """try:
         stdscr = curses.initscr()
         curses.noecho()
         curses.cbreak()
@@ -348,4 +421,4 @@ if __name__ == "__main__":
         curses.echo()
         curses.nocbreak()
         curses.endwin()
-
+    """
