@@ -10,8 +10,10 @@
 import argparse
 import csv
 import curses
+import datetime
 import ipaddress
 import pcapy
+import signal
 import socket
 import sys
 import threading
@@ -22,30 +24,26 @@ from struct import *
 # verbose mode
 verbose = False
 
+# when sniffing all available interfaces, interface = "any",
+# offset is 2, because packet will contain information about
+# interface it's from
+offset = 2
 
-def main():
-    # list all devices
-    # devices = pcapy.findalldevs()
+# time for timestamp
+now = datetime.datetime.now()
 
-    dev = 'wlp3s0'
-    print "Sniffing device " + dev
 
-    '''
-    open device
-    # Arguments here are:
-    #   device
-    #   snaplen (maximum number of bytes to capture _per_packet_)
-    #   promiscious mode (1 for true)
-    #   timeout (in milliseconds)
-    '''
-    cap = pcapy.open_live(dev, 65536, 1, 0)
+def sniff(interface):
+    # open interface
+    cap = pcapy.open_live(interface, 65536, 1, 0)
+
+    # print empty statistics, to show something till get real ones
+    Pool.printStatistics()
 
     # start sniffing packets
     while(1):
         (header, packet) = cap.next()
-        # print ('%s: captured %d bytes, truncated to %d bytes'
-        #   %(datetime.datetime.now(), header.getlen(), header.getcaplen()))
-        parse_packet(packet)
+        parse_packet(packet[offset:])
 
 
 def parse_packet(packet):
@@ -110,18 +108,11 @@ def parse_packet(packet):
                     leaseTime = leaseTime[:4]
                     leaseTime = unpack('!i', leaseTime)[0]
 
-
                     IP = str(yourIP[0]) + '.' + str(yourIP[1]) + '.'
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
 
                     # add ip to statistics
                     Pool.addIP2Range(IP, leaseTime)
-
-                    # DEBUG
-                    if verbose:
-                        print "ACK"
-                        print 'YourIP ' + IP
-                        print "Release time:" + str(leaseTime)
 
                 # number of RELEASE == 7
                 if reqType == 7:
@@ -136,11 +127,6 @@ def parse_packet(packet):
 
                     # remove ip from statistics
                     Pool.removeIPFromRange(IP)
-
-                    # DEBUG
-                    if verbose:
-                        print "RELEASE"
-                        print 'YourIP ' + IP
 
 
 def errorOutput(msg):
@@ -179,7 +165,7 @@ def checkFormat(network):
     try:
         network = ipaddress.ip_network(unicode(network))
     except:
-        errorOutput("Wrong IP for the mask given")
+        errorOutput("Wrong IP for the given mask")
 
     return network
 
@@ -195,7 +181,6 @@ class LeaseTimer:
         self.reset = False
 
     def setTimer(self, ip, leaseTime):
-        print "set timer for ", ip
         t = threading.Timer(leaseTime, self._timerFunc, [ip])
         self.timers.append([ip, t])
         t.start()
@@ -207,8 +192,6 @@ class LeaseTimer:
         self.setTimer(ip, leaseTime)
 
     def _timerFunc(self, ip):
-        if verbose:
-            print "Lease time is up or timer was canceled for: ", ip
         # do action when time's up
         if not self.reset:
             self.stopTimer(ip)
@@ -219,7 +202,6 @@ class LeaseTimer:
             if t[0] == ip:
                 self.timers.remove(t)
                 t[1].cancel()
-                print "timer canceled"
                 break
 
 
@@ -237,11 +219,7 @@ class NetPools:
         self.timer = LeaseTimer()
 
     def addNetwork(self, net):
-        """
-        Adds a network to the pool
-        Arguments:
-         - net = network address in string
-        """
+        """Adds a network given as string to the pool"""
         self.networks.append(Network(checkFormat(net)))
 
     def addIP2Range(self, ip, leaseTime):
@@ -249,20 +227,24 @@ class NetPools:
         Adds IP to the right range(s)
         Arguments:
         - ip = ip address in string
+        - leaseTime = lease time of IP in seconds
         """
         if ip in self.ips:
             # reset the timer
             self.timer.resetTimer(ip, leaseTime)
             pass
         else:
-            self.ips.append(ip)
-            self.timer.setTimer(ip, leaseTime)
+            interested = False
 
             for net in self.networks:
                 if net.isInRange(ip):
+                    interested = True
                     net.increaseHosts()
-                    print "HERE"
                     self.printStatistics()
+
+            if interested:
+                self.ips.append(ip)
+                self.timer.setTimer(ip, leaseTime)
 
     def removeIPFromRange(self, ip):
         """
@@ -283,23 +265,26 @@ class NetPools:
                     self.printStatistics()
 
     def getStatistics(self):
-        """Returns list of staitistic lines in CSV format"""
+        """Returns list of statistic lines in CSV format"""
         data = []
+        timestammp = ("%02d/%02d/%s %02d:%02d:%02d") % \
+                     (now.month, now.day, now.year,
+                      now.hour, now.minute, now.second)
         for n in self.networks:
             A = str(n.net) + ","
             H = str(n.maxHosts) + ","
             AH = str(n.allocatedHosts) + ","
             U = round(float(n.allocatedHosts) / n.maxHosts * 100, 2)
-            U = str(U) + "%"
-            data.append(A + H + AH + U)
+            U = str(U) + "%,"
+            data.append(A + H + AH + U + timestammp)
         return data
 
     def printStatistics(self):
-        # stdscr.clear()
+        stdscr.clear()
         headers = ["IP Prefix", "Max hosts",
                    "Allocated addresses", "Utilization"]
-        print (headers[0] + "\t" + headers[1] + "\t" +
-               headers[2] + "\t" + headers[3] + "\n")
+        stdscr.addstr(headers[0] + "\t" + headers[1] + "\t" +
+                      headers[2] + "\t" + headers[3] + "\n")
 
         for n in self.networks:
             A = str(n.net) + "\t"
@@ -310,9 +295,9 @@ class NetPools:
                                           ) * " " + "\t"
             U = round(float(n.allocatedHosts) / n.maxHosts * 100, 2)
             U = str(U) + "%\n"
-            print (A + H + AH + U)
+            stdscr.addstr(A + H + AH + U)
 
-        # stdscr.refresh()
+        stdscr.refresh()
 
 
 class Network:
@@ -343,23 +328,18 @@ class Network:
         self.allocatedHosts -= 1
 
 
-def createCSVFile():
-    """Creates a new CSV file and saves statistics there"""
-    with open('log.csv', 'wb') as csvfile:
-        spamwriter = csv.writer(csvfile, delimiter=',')
-        headers = ["IP Prefix", "Max hosts",
-                   "Allocated addresses", "Utilization"]
-        spamwriter.writerow(headers)
-        spamwriter.writerow(Pool.getStatistics())
-
-
 def logFunction(period):
-    """Function exports every period seconds statistics to file"""
-    print period
+    """Function creates a file and exports every period seconds
+    statistics to the file in CSV format
+    """
+    csvfile = open('log.csv', 'wb')
+    spamwriter = csv.writer(csvfile, delimiter=',')
+    headers = ["IP Prefix", "Max hosts", "Allocated addresses",
+               "Utilization", "Timestamp"]
     while True:
         time.sleep(float(period))
-        print "exporting"
-        createCSVFile()
+        spamwriter.writerow(headers)
+        spamwriter.writerow(Pool.getStatistics())
 
 
 def exportStatistics(period):
@@ -370,8 +350,15 @@ def exportStatistics(period):
     t.start()
 
 
-def importPCAP(file):
-    pass
+def printInterfaces():
+    interfaces = pcapy.findalldevs()
+    if len(interfaces) == 0:
+        print "NO available interfaces"
+    else:
+        print "Available interfaces:"
+        for i in interfaces:
+            print i
+    sys.exit(0)
 
 
 if __name__ == "__main__":
@@ -380,40 +367,55 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='DHCP communication' +
                                                  ' monitoring script')
 
-    parser.add_argument('-v', action='store_true', help='verbose mode')
     parser.add_argument('-c', metavar='<int>',
                         help='export statistics to a file every int sec')
-    parser.add_argument('-r', metavar='<file>',
-                        help='create statistics from pcap file')
+    parser.add_argument('-f', action='store_true',
+                        help='print available interfaces')
+    parser.add_argument('-i', metavar='<interface>',
+                        help='sniff only a given interface')
     parser.add_argument('NETWORKS', nargs='+', help='')
 
     args = vars(parser.parse_args())
 
-    if args['v']:
-        verbose = True
-
     if args['c']:
         exportStatistics(args['c'])
 
-    if args['r']:
-        importPCAP(args['r'])
+    if args['f']:
+        printInterfaces()
+
+    # default option, sniff all available interfaces
+    interface = "any"
+
+    # sniff only given interface
+    if args['i']:
+        offset = 0
+        interface = args['i']
 
     # create instance of Network pools
     Pool = NetPools()
 
     for net in args["NETWORKS"]:
         Pool.addNetwork(net)
-        print net
 
-    # print Pool.networks[0].isInRange(unicode('10.10.10.2'))
-
-    main()
-    """try:
+    try:
         stdscr = curses.initscr()
         curses.noecho()
         curses.cbreak()
         stdscr.keypad(1)
-        main()
+
+        # sniff in a new thread, main thread will wait for signal to stop
+        # otherwise, main thread may not be able to catch sigint, especially
+        # when it would be waiting for packet on cap.next() call
+        t = threading.Thread(target=sniff, args=(interface,))
+        t.daemon = True
+        t.start()
+
+        while True:
+            try:
+                signal.pause()
+            except:
+                # when catches sigint, end with normal exit code
+                sys.exit(0)
     finally:
         stdscr.erase()
         stdscr.refresh()
@@ -421,4 +423,3 @@ if __name__ == "__main__":
         curses.echo()
         curses.nocbreak()
         curses.endwin()
-    """
