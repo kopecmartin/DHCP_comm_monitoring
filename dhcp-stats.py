@@ -1,4 +1,4 @@
-# !/usr/bin/python
+#!/usr/bin/python
 
 # #######################
 # Project: ISA - DHCP communication monitoring
@@ -28,9 +28,6 @@ verbose = False
 # interface it's from
 offset = 2
 
-# time for timestamp
-now = datetime.datetime.now()
-
 
 def sniff(interface):
     # open an interface
@@ -49,7 +46,11 @@ def sniff(interface):
 
 
 def parse_packet(packet):
-    """Parses packet, obtains information from DHCP packets only"""
+    """
+    Parses packet, obtains information from DHCP packets only
+    Function is inspired by: http://www.binarytides.com/code-a-packe
+        -sniffer-in-python-with-pcapy-extension/
+    """
 
     # parse ethernet header
     ethLength = 14
@@ -96,14 +97,41 @@ def parse_packet(packet):
                 data = packet[hSize + 241:]
                 reqType = unpack('!BBB', data[:3])[1]
 
+                pos = hSize + 240
+                foundType = False
+                option = unpack('!B', packet[pos:pos + 1])[0]
+
+                while (not foundType and option != 255):
+                    if option == 53:  # req type
+                        foundType = True
+                        pos += 1
+                        reqType = unpack('!BB', packet[pos: pos + 2])[1]
+                    else:
+                        length = unpack('!B', packet[pos + 1:pos + 2])[0]
+                        pos = pos + 2 + length
+                        option = unpack('!B', packet[pos:pos + 1])[0]
+                        continue
+
                 # number of ACK == 5
                 if reqType == 5:
 
-                    leaseTime = unpack('!i', packet[293:297])[0]
+                    pos += 2
+                    foundTime = False
+                    option = unpack('!B', packet[pos: pos + 1])[0]
 
-                    # leaeTime == -256 means, it's ACK as a response
+                    while (not foundTime and option != 255):
+                        if option == 51:
+                            foundTime = True
+                            pos += 2
+                            leaseTime = unpack('!i', packet[pos:pos + 4])[0]
+                        else:
+                            length = unpack('!B', packet[pos + 1:pos + 2])[0]
+                            pos = pos + 2 + length
+                            option = unpack('!B', packet[pos: pos + 1])[0]
+                            continue
+
                     # on DHCPINFORM, there is no lease time
-                    if leaseTime == -256:
+                    if foundTime is False:
                         # new IP of a device
                         yourIP = packet[hSize + 12:]
                     else:
@@ -117,14 +145,13 @@ def parse_packet(packet):
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
 
                     # add ip to statistics
-                    if leaseTime == -256:
+                    if foundTime is False:
                         Pool.addStaticIP2Range(IP)
                     else:
                         Pool.addIP2Range(IP, leaseTime)
 
                 # number of RELEASE == 7
                 if reqType == 7:
-
                     # IP of the device, the IP whill be released
                     yourIP = packet[hSize + 12:]
                     yourIP = yourIP[:4]
@@ -140,9 +167,9 @@ def parse_packet(packet):
 def errorOutput(msg):
     """Prints error message and ends with error code"""
     sys.stderr.write("\033[1;31mERROR: " + msg + "\033[0m\n")
-    sys.stdout.write("\nDHCP communication monitoring script:\n")
-    sys.stdout.write("Run as:\n./dhcp-stats.py <ip_addr/mask> ")
-    sys.stdout.write("[ <ip_addr/mask> [...] ]\n\n")
+    sys.stderr.write("\nDHCP communication monitoring script:\n")
+    sys.stderr.write("Run as:\n./dhcp-stats.py <ip_addr/mask> ")
+    sys.stderr.write("[ <ip_addr/mask> [...] ]\n\n")
     sys.exit(1)
 
 
@@ -261,6 +288,7 @@ class NetPools:
     def getStatistics(self):
         """Returns list of statistic lines in CSV format"""
         data = []
+        now = datetime.datetime.now()
         timestammp = ("%02d/%02d/%s %02d:%02d:%02d") % \
                      (now.month, now.day, now.year,
                       now.hour, now.minute, now.second)
