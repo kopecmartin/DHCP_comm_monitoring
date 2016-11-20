@@ -4,11 +4,10 @@
 # Project: ISA - DHCP communication monitoring
 # Description:
 # Author: Martin Kopec (xkopec42)
-# Date:
+# Date: 19.11.2016
 # #######################
 
 import argparse
-import csv
 import curses
 import datetime
 import ipaddress
@@ -34,7 +33,7 @@ now = datetime.datetime.now()
 
 
 def sniff(interface):
-    # open interface
+    # open an interface
     cap = pcapy.open_live(interface, 65536, 1, 0)
 
     # print empty statistics, to show something till get real ones
@@ -42,8 +41,11 @@ def sniff(interface):
 
     # start sniffing packets
     while(1):
-        (header, packet) = cap.next()
-        parse_packet(packet[offset:])
+        try:
+            (header, packet) = cap.next()
+            parse_packet(packet[offset:])
+        except:
+            pass
 
 
 def parse_packet(packet):
@@ -51,7 +53,6 @@ def parse_packet(packet):
 
     # parse ethernet header
     ethLength = 14
-
     ethHeader = packet[:ethLength]
     eth = unpack('!6s6sH', ethHeader)
     eth_protocol = socket.ntohs(eth[2])
@@ -78,11 +79,10 @@ def parse_packet(packet):
         if protocol == 17:
             u = iphLength + ethLength
             udphLength = 8
-            udpHeader = packet[u:u + 8]
+            udpHeader = packet[u:u + udphLength]
 
             # unpack UDP header
             udph = unpack('!HHHH', udpHeader)
-
             srcPort = udph[0]
 
             # DHCP protocol
@@ -99,20 +99,28 @@ def parse_packet(packet):
                 # number of ACK == 5
                 if reqType == 5:
 
-                    # new IP of a device
-                    yourIP = packet[hSize + 16:]
+                    leaseTime = unpack('!i', packet[293:297])[0]
+
+                    # leaeTime == -256 means, it's ACK as a response
+                    # on DHCPINFORM, there is no lease time
+                    if leaseTime == -256:
+                        # new IP of a device
+                        yourIP = packet[hSize + 12:]
+                    else:
+                        # new IP of a device
+                        yourIP = packet[hSize + 16:]
+
                     yourIP = yourIP[:4]
                     yourIP = unpack('!BBBB', yourIP)
-
-                    leaseTime = packet[hSize + 257:]
-                    leaseTime = leaseTime[:4]
-                    leaseTime = unpack('!i', leaseTime)[0]
 
                     IP = str(yourIP[0]) + '.' + str(yourIP[1]) + '.'
                     IP = IP + str(yourIP[2]) + '.' + str(yourIP[3])
 
                     # add ip to statistics
-                    Pool.addIP2Range(IP, leaseTime)
+                    if leaseTime == -256:
+                        Pool.addStaticIP2Range(IP)
+                    else:
+                        Pool.addIP2Range(IP, leaseTime)
 
                 # number of RELEASE == 7
                 if reqType == 7:
@@ -136,38 +144,6 @@ def errorOutput(msg):
     sys.stdout.write("Run as:\n./dhcp-stats.py <ip_addr/mask> ")
     sys.stdout.write("[ <ip_addr/mask> [...] ]\n\n")
     sys.exit(1)
-
-
-def checkFormat(network):
-    """
-    Checks format of network address
-    returns ip_network object
-    """
-
-    net = network.split("/")
-    if len(net) != 2:
-        errorOutput("Wrong format of IP address and mask")
-
-    mask = net[1]
-    net = net[0]
-
-    if int(mask) > 32 or int(mask) < 0:
-        errorOutput("Wrong network mask")
-
-    check = net.split('.')
-    if len(check) != 4:
-        errorOutput("Wrong format of IP address")
-
-    for n in check:
-        if len(n) == 0 or int(n) < 0 or int(n) > 255:
-            errorOutput("Wrong format of IP address")
-
-    try:
-        network = ipaddress.ip_network(unicode(network))
-    except:
-        errorOutput("Wrong IP for the given mask")
-
-    return network
 
 
 class LeaseTimer:
@@ -220,7 +196,26 @@ class NetPools:
 
     def addNetwork(self, net):
         """Adds a network given as string to the pool"""
-        self.networks.append(Network(checkFormat(net)))
+        try:
+            network = ipaddress.ip_network(unicode(net))
+        except:
+            errorOutput("Wrong format of the IP address: " + net)
+
+        self.networks.append(Network(network))
+
+    def addStaticIP2Range(self, ip):
+        """Adds IP to the right range, does not set up a timer"""
+        if ip not in self.ips:
+            interested = False
+
+            for net in self.networks:
+                if net.isInRange(ip):
+                    interested = True
+                    net.increaseHosts()
+                    self.printStatistics()
+
+            if interested:
+                self.ips.append(ip)
 
     def addIP2Range(self, ip, leaseTime):
         """
@@ -232,7 +227,6 @@ class NetPools:
         if ip in self.ips:
             # reset the timer
             self.timer.resetTimer(ip, leaseTime)
-            pass
         else:
             interested = False
 
@@ -276,20 +270,21 @@ class NetPools:
             AH = str(n.allocatedHosts) + ","
             U = round(float(n.allocatedHosts) / n.maxHosts * 100, 2)
             U = str(U) + "%,"
-            data.append(A + H + AH + U + timestammp)
+            data.append(A + H + AH + U + timestammp + "\n")
         return data
 
     def printStatistics(self):
         stdscr.clear()
-        headers = ["IP Prefix", "Max hosts",
+        headers = ["IP Prefix" + " " * 9, "Max hosts",
                    "Allocated addresses", "Utilization"]
         stdscr.addstr(headers[0] + "\t" + headers[1] + "\t" +
                       headers[2] + "\t" + headers[3] + "\n")
 
         for n in self.networks:
-            A = str(n.net) + "\t"
-            H = str(n.maxHosts) + (len(headers[1]) -
-                                   len(str(n.maxHosts))) * " " + "\t"
+            A = str(n.net) + " " * (len(headers[0]) - len(str(n.net))) + "\t"
+            H = str(n.maxHosts) + " " * (len(headers[1]) -
+                                         len(str(n.maxHosts))
+                                         ) + "\t"
             AH = str(n.allocatedHosts) + (len(headers[2]) -
                                           len(str(n.allocatedHosts))
                                           ) * " " + "\t"
@@ -311,9 +306,19 @@ class Network:
         # number of assigned IPs at the moment
         self.allocatedHosts = 0
         # number of usable addresses
-        self.maxHosts = net.num_addresses - 2
+        if net.prefixlen == 32:
+            self.maxHosts = 1
+        elif net.prefixlen == 31:
+            self.maxHosts = 2
+        else:
+            self.maxHosts = net.num_addresses - 2
 
     def isInRange(self, ip):
+        if self.net.prefixlen == 32:
+            if self.net.network_address == ipaddress.ip_address(unicode(ip)):
+                return True
+            else:
+                return False
         for i in self.net.hosts():
             if ip == str(i):
                 return True
@@ -328,18 +333,22 @@ class Network:
         self.allocatedHosts -= 1
 
 
+def writeRow(file, lst):
+    for l in lst:
+        file.write(l)
+
+
 def logFunction(period):
     """Function creates a file and exports every period seconds
     statistics to the file in CSV format
     """
-    csvfile = open('log.csv', 'wb')
-    spamwriter = csv.writer(csvfile, delimiter=',')
-    headers = ["IP Prefix", "Max hosts", "Allocated addresses",
-               "Utilization", "Timestamp"]
+    csvfile = open('log.csv', 'a', 0)
+    headers = ["IP Prefix,", "Max hosts,", "Allocated addresses,",
+               "Utilization,", "Timestamp\n"]
+    writeRow(csvfile, headers)
     while True:
         time.sleep(float(period))
-        spamwriter.writerow(headers)
-        spamwriter.writerow(Pool.getStatistics())
+        writeRow(csvfile, Pool.getStatistics())
 
 
 def exportStatistics(period):
