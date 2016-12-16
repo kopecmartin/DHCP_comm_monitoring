@@ -1,8 +1,7 @@
 #!/usr/bin/python
 
 # #######################
-# Project: ISA - DHCP communication monitoring
-# Description:
+# Project: DHCP communication monitoring
 # Author: Martin Kopec (xkopec42)
 # Date: 19.11.2016
 # #######################
@@ -20,29 +19,20 @@ import time
 
 from struct import *
 
-# verbose mode
-verbose = False
-
 # when sniffing all available interfaces, interface = "any",
 # offset is 2, because packet will contain information about
 # interface it's from
 offset = 2
 
 
-def sniff(interface):
-    # open an interface
-    cap = pcapy.open_live(interface, 65536, 1, 0)
-
+def sniff(cap):
     # print empty statistics, to show something till get real ones
     Pool.printStatistics()
 
     # start sniffing packets
     while(1):
-        try:
-            (header, packet) = cap.next()
-            parse_packet(packet[offset:])
-        except:
-            pass
+        (header, packet) = cap.next()
+        parse_packet(packet[offset:])
 
 
 def parse_packet(packet):
@@ -110,7 +100,6 @@ def parse_packet(packet):
                         length = unpack('!B', packet[pos + 1:pos + 2])[0]
                         pos = pos + 2 + length
                         option = unpack('!B', packet[pos:pos + 1])[0]
-                        continue
 
                 # number of ACK == 5
                 if reqType == 5:
@@ -128,7 +117,6 @@ def parse_packet(packet):
                             length = unpack('!B', packet[pos + 1:pos + 2])[0]
                             pos = pos + 2 + length
                             option = unpack('!B', packet[pos: pos + 1])[0]
-                            continue
 
                     # on DHCPINFORM, there is no lease time
                     if foundTime is False:
@@ -410,7 +398,7 @@ if __name__ == "__main__":
                         help='print available interfaces')
     parser.add_argument('-i', metavar='<interface>',
                         help='sniff only a given interface')
-    parser.add_argument('NETWORKS', nargs='+', help='')
+    parser.add_argument('NETWORKS', nargs='*', help='')
 
     args = vars(parser.parse_args())
 
@@ -419,6 +407,9 @@ if __name__ == "__main__":
 
     if args['f']:
         printInterfaces()
+
+    if len(args['NETWORKS']) == 0:
+        errorOutput("No network given")
 
     # default option, sniff all available interfaces
     interface = "any"
@@ -431,7 +422,7 @@ if __name__ == "__main__":
     # create instance of Network pools
     Pool = NetPools()
 
-    for net in args["NETWORKS"]:
+    for net in args['NETWORKS']:
         Pool.addNetwork(net)
 
     try:
@@ -440,10 +431,18 @@ if __name__ == "__main__":
         curses.cbreak()
         stdscr.keypad(1)
 
+        msg = ""
+        # try to open an interface
+        try:
+            cap = pcapy.open_live(interface, 65536, 1, 0)
+        except:
+            msg = "You must be root!"
+            sys.exit(1)
+
         # sniff in a new thread, main thread will wait for signal to stop
         # otherwise, main thread may not be able to catch sigint, especially
         # when it would be waiting for packet on cap.next() call
-        t = threading.Thread(target=sniff, args=(interface,))
+        t = threading.Thread(target=sniff, args=(cap))
         t.daemon = True
         t.start()
 
@@ -460,3 +459,5 @@ if __name__ == "__main__":
         curses.echo()
         curses.nocbreak()
         curses.endwin()
+        if msg != "":
+            errorOutput(msg)
