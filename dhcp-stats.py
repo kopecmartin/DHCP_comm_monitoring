@@ -2,8 +2,8 @@
 
 # #######################
 # Project: DHCP communication monitoring
-# Author: Martin Kopec (xkopec42)
-# Date: 19.11.2016
+# Author: Martin Kopec
+# Date: 16.12.2016
 # #######################
 
 import argparse
